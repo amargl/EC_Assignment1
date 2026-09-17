@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Literal
 import os
 import names
+import matplotlib as mpl
 
 # Third-party libraries
 import mujoco as mj
@@ -92,6 +93,12 @@ Following package
 """
 import matplotlib.pyplot as plt
 
+#to make font computer modern like in latex
+fpath = Path(mpl.get_data_path(), "fonts/ttf/cmr10.ttf")
+prop = mpl.font_manager.FontProperties(fname=fpath)
+mpl.font_manager.fontManager.addfont(str(fpath))
+mpl.rcParams["font.family"] = prop.get_name()
+
 # --- RANDOM GENERATOR SETUP --- #
 # Fix the seed while you are debugging.
 # Report results over MULTIPLE seeds.
@@ -123,6 +130,7 @@ SPAWN_POS: list[float] = [0.0, 0.0, 0.1]
 """"""""""""""""""""""""""
 "!!!!!!!TEST PARAMETERS!!!!!--GR16--"
 """"""""""""""""""""""""""
+P_CROSSOVER = 0.5
 P_MUTATION = 0.6
 MUTATION_FUNC = "replace_node"
 POINTS = 3
@@ -319,7 +327,7 @@ def initialize_population(targets:list, n:int=50) -> Population:
 6. Evolution--GR16--
 """""""""""""""""""""""""""
 
-def reproduction(parents: Population,p_mutation: float, mutation_func:str, points:int= 1) -> list[Individual]:
+def reproduction(parents: Population,p_mutation: float, mutation_func:str, points:int= 1, baseline:bool = False) -> list[Individual]:
     """Perform standard GP subtree crossover on tree genomes.
 
     Two offspring are produced by exchanging randomly chosen subtrees from each parent.
@@ -376,13 +384,19 @@ def reproduction(parents: Population,p_mutation: float, mutation_func:str, point
     # This simply means that we doe a crossover between genomes
     # points times
     for _ in range(points):
+        # We do not perform crossover for the baseline cases
+        if baseline:
+            break
         # We then perform Multi-parent recombination
         # It does not matter in our case how many parents the
         for i in range(amount_of_parents):
-            # We find the nodes where we want to perform the cut:
-            cut_1 = pick_noncore(genomes[i])
-            cut_2 = pick_noncore(child_genomes[(i + 1)%amount_of_parents])
-            subtree_swap(genomes[i], child_genomes[(i + 1)%amount_of_parents], cut_1, cut_2)
+            # We perform a crossover under certain prbability
+            # and when it is not the baseline case
+            if random.random() < P_CROSSOVER:
+                # We find the nodes where we want to perform the cut:
+                cut_1 = pick_noncore(genomes[i])
+                cut_2 = pick_noncore(child_genomes[(i + 1)%amount_of_parents])
+                subtree_swap(genomes[i], child_genomes[(i + 1)%amount_of_parents], cut_1, cut_2)
 
     try:
         for g in child_genomes:
@@ -400,8 +414,9 @@ def reproduction(parents: Population,p_mutation: float, mutation_func:str, point
 def evolution_step(pop: Population,
                    amount_parents:int = AMOUNT_PARENTS,
                    mutation_func:str = MUTATION_FUNC,
-                   p_mutation = P_MUTATION,
-                   points = POINTS):
+                   p_mutation:float = P_MUTATION,
+                   points:int = POINTS,
+                   base_line:bool = False) -> Individual:
     # We take a subsection of the population
     sub_pop = pop.sample(SAMPLE_SIZE)
     # from this section, we take n individuals
@@ -409,7 +424,7 @@ def evolution_step(pop: Population,
     parents = sub_pop.best(sort="min", n=amount_parents)
     # We reproduce these individuals to
     # get the offspring
-    children = reproduction(parents, mutation_func= mutation_func, p_mutation=p_mutation, points=points)
+    children = reproduction(parents, mutation_func=mutation_func, p_mutation=p_mutation, points=points, baseline=base_line)
     # We add the offspring to the subsection
     # of the population and to the general population
     pop.extend(children)
@@ -431,25 +446,35 @@ def evolution_step(pop: Population,
 def experiment(experiment:str,targets,
                timesteps:int=50,
                amount_parents:int = AMOUNT_PARENTS,
-               mutation_func:str = MUTATION_FUNC,
-               p_mutation = P_MUTATION,
-               points = POINTS):
+               points:int = POINTS,
+               baseline:bool = False):
     # We initialize a population
     pop = initialize_population(targets, POPULATION_SIZE)
     show_body_tree(pop[0].genotype.to_networkx(),file_name="start")
     os.makedirs(DATA / experiment / "best_genotype", exist_ok=True)
     os.makedirs(DATA / experiment / "statistics", exist_ok=True)
 
-    # We define the files where we want to place our target data
-    target_files = [
-        open(DATA / experiment / "statistics" / f"target_0{t}", "w")
-        for t in range(len(targets))
-    ]
 
-    with open(DATA / experiment / "statistics"/"general_stats", "w") as f:
+
+    if baseline:
+        stat_type = "baseline"
+        # We do not update the target files when we
+        # look for the baseline
+        target_files = None
+    else:
+        stat_type = "general"
+        # We define the files where we want to place our target data
+        target_files = [
+            open(DATA / experiment / "statistics" / f"target_{t}_stats", "w")
+            for t in range(len(targets))
+        ]
+    with open(DATA / experiment / "statistics"/f"{stat_type}_stats", "w") as f:
         for i in range(timesteps):
             # We perform an evolution step
-            pop = evolution_step(pop)
+            pop = evolution_step(pop,
+                                 amount_parents=amount_parents,
+                                 points=points,
+                                 base_line=baseline)
             # We determine the best and worst of the populatio
             best = pop.best(sort="min", n=1)[0]
             worst = pop.best(sort="max", n=1)[0]
@@ -461,6 +486,9 @@ def experiment(experiment:str,targets,
             total_fitness =  np.array([pop.fitness for pop in pop])
             # We write down the statistics
             f.write(f"{best.fitness:.2f}\t{float(np.mean(total_fitness)):.2f}\t{float(np.std(total_fitness)):.2f}\t{float(worst.fitness):.2f}\n")
+            if baseline:
+                # we ignore the targets for the baseline cases
+                continue
             # We also determine the distance from eah individual to
             # each target
             for t, tar in enumerate(targets):
@@ -481,31 +509,25 @@ def experiment(experiment:str,targets,
 7. Plots and stats --GR16--
 """""
 
-def plot_stats(experiment:str, target_plot:bool = False):
+def plot_target_stats(experiment:str):
     # We want to be able to plot multiple plots next to
     # each other (for the target cases)
-    if target_plot:
-        amount_of_plots = 5
-    else:
-        amount_of_plots = 1
+    amount_of_plots = 5
+    files = [f"target_{i}" for i in range(amount_of_plots)]
+
     fig, axes = plt.subplots(1, amount_of_plots, figsize=(6 * amount_of_plots, 5), sharey=True)
-    if not target_plot:
+    if amount_of_plots == 1:
         axes = [axes]
 
     # We define the statistics that are saved
-    for ax, i in zip(axes, range(amount_of_plots)):
+    for ax, file in zip(axes, files):
         best_fitness = []
         mean_std_fitness = []
         std_fitness = []
         worst_fitness = []
         timesteps = 0
-        # We set the file name
-        if not target_plot:
-            file = "general_stats"
-        else:
-            file = f"target_0{i}"
 
-        with open(DATA / experiment / "statistics"/file, "r") as f:
+        with open(DATA / experiment / "statistics"/f"{file}_stats", "r") as f:
             for l in f.readlines():
                 info = l.split("\t")
                 best_fitness.append(float(info[0]))
@@ -518,20 +540,17 @@ def plot_stats(experiment:str, target_plot:bool = False):
         upper = [mean_std_fitness[i] + std_fitness[i] for i in range(timesteps)]
         lower = [mean_std_fitness[i] - std_fitness[i] for i in range(timesteps)]
         # We also plot the mean, best and worst fitnesses
-        ax.plot(range(timesteps), mean_std_fitness, label="Mean Fitness")
-        ax.plot(range(timesteps), upper, color="gray", linestyle="--", label="STD Fitness")
-        ax.plot(range(timesteps), lower, color="gray", linestyle="--")
-        ax.plot(range(timesteps), best_fitness, label="Best Fitness")
-        ax.plot(range(timesteps), worst_fitness, label="Worst Fitness")
-
+        ax.plot(range(timesteps), mean_std_fitness, label="Mean Fitness", color="gray")
+        ax.fill_between(range(timesteps), upper, lower, color="gray", alpha=0.2)
+        ax.plot(range(timesteps), best_fitness, label="Best Fitness", color="green")
+        ax.plot(range(timesteps), worst_fitness, label="Worst Fitness", color="red")
         """"
         We need to change the titles and to represent the targets when doing target plot
         """
-        ax.set_title(experiment)
+        name = "target " + file.split("_")[1]
+        ax.set_title(name)
         ax.legend()
 
-    if file != "general_stats":
-        file = "dinstance_to_targets"
     fig.tight_layout()
     """"
     We want the file type to be svg in the final,
@@ -539,23 +558,71 @@ def plot_stats(experiment:str, target_plot:bool = False):
     for testing png works fine :)
     """
     os.makedirs(DATA / experiment / "plots", exist_ok=True)
-    fig.savefig(str(DATA / experiment / "plots"/f"{file}.svg"), dpi=200, bbox_inches="tight")
-    fig.savefig(str(DATA / experiment / "plots" / f"{file}.png"), dpi=200, bbox_inches="tight")
+    fig.savefig(str(DATA / experiment / "plots"/f"target_plot.svg"), dpi=200, bbox_inches="tight")
+    fig.savefig(str(DATA / experiment / "plots" / f"target_plot.png"), dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-""""
-Target thingy and base line
-"""
+def plot_general_stats(experiment:str):
+    # We want to be able to plot multiple plots next to
+    # each other (for the target cases)
+    amount_of_plots = 1
+    files = ["general", "baseline"]
+
+
+    # We define the statistics that are saved
+    for file in files:
+        best_fitness = []
+        mean_std_fitness = []
+        std_fitness = []
+        worst_fitness = []
+        timesteps = 0
+
+        with open(DATA / experiment / "statistics"/f"{file}_stats", "r") as f:
+            for l in f.readlines():
+                info = l.split("\t")
+                best_fitness.append(float(info[0]))
+                mean_std_fitness.append(float(info[1]))
+                std_fitness.append(float(info[2]))
+                worst_fitness.append(float(info[3]))
+                timesteps +=1
+
+        if file == "baseline":
+            plt.plot(range(timesteps), best_fitness,linestyle = "--", label="Baseline Fitness", color="green")
+            break
+        # We set the upper and lower bound of the std
+        upper = [mean_std_fitness[i] + std_fitness[i] for i in range(timesteps)]
+        lower = [mean_std_fitness[i] - std_fitness[i] for i in range(timesteps)]
+        # We also plot the mean, best and worst fitnesses
+        plt.plot(range(timesteps), mean_std_fitness, label="Mean Fitness", color="gray")
+        plt.fill_between(range(timesteps), upper, lower, color="gray", alpha=0.2)
+        plt.plot(range(timesteps), best_fitness, label="Best Fitness", color="green")
+        plt.plot(range(timesteps), worst_fitness, label="Worst Fitness", color="red")
+    """"
+    We need to change the titles and to represent the targets when doing target plot
+    """
+    split = experiment.split("_")
+    front = split[0].split("-")
+    name = f"Amount of crossovers: {front[1]}"
+    plt.title(name)
+    plt.legend()
+    plt.tight_layout()
+    """"
+    We want the file type to be svg in the final,
+    (these are vectorized drawings so you can zoom in indefenately)
+    for testing png works fine :)
+    """
+    os.makedirs(DATA / experiment / "plots", exist_ok=True)
+    plt.savefig(str(DATA / experiment / "plots"/f"general_plot.svg"), dpi=200, bbox_inches="tight")
+    plt.savefig(str(DATA / experiment / "plots" / f"general_plot.png"), dpi=200, bbox_inches="tight")
+    plt.close()
 
 if __name__ == "__main__":
-
-
     """""""""
     "Before running a experiment, make sure to change the experiment run:"
     """""""""
     TIMESTEPS = 50
-    EXPERIMENTAL_RUNS = 1
+    EXPERIMENTAL_RUNS = 5
     # We create a heaven for all the dead soldiers
     os.makedirs(DATA / "heaven", exist_ok=True)
     # We load the targets
@@ -581,11 +648,25 @@ if __name__ == "__main__":
                            timesteps=TIMESTEPS,
                            amount_parents=amount,
                            points=point)
-                plot_stats(f"point-{point}_parent-{amount}/exp{i}")
-                plot_stats(f"point-{point}_parent-{amount}/exp{i}", target_plot=True)
+                # We perform the same experiment, without performing crossover (AKA our baseline)
+                # For this we have to set our seed back to the original value
+                RNG = np.random.default_rng(SEED)
+                random.seed(SEED)
+                torch.manual_seed(SEED)
+                plot_target_stats(f"point-{point}_parent-{amount}/exp{i}")
+                experiment(f"point-{point}_parent-{amount}/exp{i}",
+                           targets,
+                           timesteps=TIMESTEPS,
+                           amount_parents=amount,
+                           points=point,
+                           baseline=True)
+                plot_general_stats(f"point-{point}_parent-{amount}/exp{i}")
                 # We change the seed of our random valuebles
                 # every time we perform an experiment
                 SEED +=1
+                RNG = np.random.default_rng(SEED)
+                random.seed(SEED)
+                torch.manual_seed(SEED)
             print("\nFinished")
             run_so_far += 1
 
