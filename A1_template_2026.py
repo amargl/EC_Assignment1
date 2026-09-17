@@ -25,6 +25,7 @@ import copy
 from pathlib import Path
 from typing import Literal
 import os
+import names
 
 # Third-party libraries
 import mujoco as mj
@@ -122,12 +123,12 @@ SPAWN_POS: list[float] = [0.0, 0.0, 0.1]
 """"""""""""""""""""""""""
 "!!!!!!!TEST PARAMETERS!!!!!--GR16--"
 """"""""""""""""""""""""""
-P_MUTATION = 0.2
+P_MUTATION = 0.6
 MUTATION_FUNC = "replace_node"
 POINTS = 3
 AMOUNT_PARENTS = 3
 SAMPLE_SIZE = 15
-POPULATION_SIZE = 50
+POPULATION_SIZE = 100
 """"""""""
 :):):):)
 """""""""""""""
@@ -135,13 +136,6 @@ POPULATION_SIZE = 50
 # ============================================================================ #
 #  1. THE TARGET BODIES
 # ============================================================================ #
-#
-# The targets are plain nx.DiGraph JSON files.
-# They vary in size on purpose. A body that just matches the average module
-# count will not score well against all of them.
-#
-# ============================================================================ #
-
 
 def load_targets(target_dir: Path = TARGET_DIR) -> list[nx.DiGraph]:
     """Load every target body graph from a directory.
@@ -163,64 +157,6 @@ def load_targets(target_dir: Path = TARGET_DIR) -> list[nx.DiGraph]:
     return [load_graph_from_json(p) for p in paths]
 
 
-# ============================================================================ #
-#  2. THE GENOTYPE CONTRACT
-# ============================================================================ #
-#
-# You may use EITHER of ARIEL's two body encodings below. You may NOT invent
-# your own, and CPPN is not offered for this assignment.
-# Whichever you pick, the contract is the same and it is very short:
-#
-#       your genotype  --(its decoder)-->  nx.DiGraph  -->  fitness
-#
-# That DiGraph is the phenotype, and it is all the fitness function ever sees:
-#
-#       nodes carry   type      : "CORE" | "BRICK" | "HINGE"
-#                     rotation  : "DEG_0" | "DEG_45" | "DEG_90"
-#       edges carry   face      : "FRONT" | "BACK" | "RIGHT" | "LEFT"
-#                                 | "TOP" | "BOTTOM"
-#
-# THE TWO ENCODINGS
-#
-#   "nde"   NeuralDevelopmentalEncoding + HighProbabilityDecoder
-#           Genotype: three fixed-length float vectors (type / connection /
-#           rotation genes). An INDIRECT encoding - a small vector is expanded
-#           by a fixed neural network into probability matrices, which are
-#           then decoded greedily into a body.
-#           -> Fixed-length real vector. Standard real-valued operators work
-#              out of the box. But the genotype-phenotype map is wildly
-#              non-linear: a small mutation can rebuild the robot entirely.
-#           -> IMPORTANT: `NeuralDevelopmentalEncoding`'s internal network is
-#              randomly (re-)initialised every time you construct it, and NOT
-#              derived from the genotype you pass in. If your EA's decode step
-#              builds a fresh `NeuralDevelopmentalEncoding(...)` per individual
-#              (the natural way to write it - see `random_nde_body` below),
-#              the SAME genotype decodes to a DIFFERENT random body every call,
-#              and fitness stops reflecting the genotype at all. Construct it
-#              ONCE for your whole run and reuse that one instance's
-#              `.forward()` for every genotype you decode.
-#           -> ALSO IMPORTANT: `NeuralDevelopmentalEncoding` is a
-#              `torch.nn.Module`. Its weight initialisation uses torch's own
-#              RNG, entirely separate from numpy/random. `np.random.seed(...)`
-#              and `random.seed(...)` do NOT control it - you also need
-#              `torch.manual_seed(...)`, or your results will not reproduce
-#              across separate runs even with "the same" seed.
-#
-#   "tree"  TreeGenome + its operators
-#           Genotype: the tree itself, nodes and edges.
-#           A DIRECT encoding - genotype and phenotype are the same shape.
-#           -> ariel.ec.genotypes.tree.operators already gives you
-#              random_tree, add_node, remove_subtree, subtree_swap,
-#              crossover_subtree, mutate_hoist, mutate_shrink,
-#              mutate_replace_node, mutate_subtree_replacement.
-#              Variable-length genotype, so watch for bloat.
-#
-#
-# Below, each encoding gets ONE random genotype, decoded to a graph. That is
-# your starting point, not your solution: your EA has to search this space,
-# not sample it once.
-#
-# ============================================================================ #
 
 # NDE settings
 GENOTYPE_SIZE: int = 64  # length of each of the three NDE gene vectors
@@ -236,66 +172,10 @@ _NDE = NeuralDevelopmentalEncoding(
 )
 
 
-def random_nde_body(num_modules: int = NUM_OF_MODULES) -> nx.DiGraph:
-    """Sample a random NDE genotype and decode it into a body graph.
-
-    THIS IS THE FUNCTION YOUR EA REPLACES. The three vectors below are the
-    genotype: that is what you mutate, recombine and select on. Note this
-    function does NOT construct its own `NeuralDevelopmentalEncoding` - it
-    reuses the module-level `_NDE` instance. Do the same in your EA.
-
-    `num_modules` must match the value `_NDE` was built with (NUM_OF_MODULES).
-    """
-    genotype = [
-        RNG.uniform(-1.0, 1.0, GENOTYPE_SIZE).astype(np.float32)  # module types
-        for _ in range(3)  # types, connections, rotations
-    ]
-
-    type_p, conn_p, rot_p = _NDE.forward(genotype)
-
-    decoder = HighProbabilityDecoder(num_modules)
-    return decoder.probability_matrices_to_graph(type_p, conn_p, rot_p)
-
-
-def random_tree_body(num_modules: int = NUM_OF_MODULES) -> nx.DiGraph:
-    """Sample a random tree genotype and convert it into a body graph.
-
-    THIS IS THE FUNCTION YOUR EA REPLACES. Here the genotype IS the tree, so
-    `TreeGenome` is what your population holds - call `.to_networkx()` only
-    when it is time to compute fitness.
-    """
-    genome = random_tree(max_modules=num_modules)
-    return genome.to_networkx()
-
-
-def random_body(
-    genotype: GenotypeTypes = GENOTYPE,
-    num_modules: int = NUM_OF_MODULES,
-) -> nx.DiGraph:
-    """Sample one random body using the chosen encoding."""
-    match genotype:
-        case "nde":
-            return random_nde_body(num_modules)
-        case "tree":
-            return random_tree_body(num_modules)
-
 
 # ============================================================================ #
 #  3. FITNESS
 # ============================================================================ #
-#
-# Fitness is the MEAN tree edit distance to every target body, PLUS one
-# standard deviation across those per-target distances. LOWER IS BETTER, and
-# 0.0 would mean your body is identical to all of them at once - which, since
-# the targets differ from each other, is impossible. There is a floor above
-# zero here and you will not reach it. Work out roughly where it is: a body
-# cannot be closer to a set than the set is to itself.
-#
-# The distance itself lives in tree_edit_distance.py.
-# Read that file - you cannot reason about your EA's behaviour without knowing what it is climbing.
-#
-# ============================================================================ #
-
 
 def fitness_function(
     body: nx.DiGraph,
@@ -364,7 +244,7 @@ def show_body(
             video_renderer(model, data, duration=5.0, video_recorder=recorder)
 
 """""""""
-Helper function to show graph --GR16--
+5. Helper function to show graph --GR16--
 """""""""
 
 def show_body_tree(body: nx.DiGraph, file_name: str = "body"):
@@ -413,48 +293,8 @@ def show_body_tree(body: nx.DiGraph, file_name: str = "body"):
     plt.savefig(str(DATA / f"{file_name}_tree.png"), dpi=200, bbox_inches="tight")
     plt.close()
 
-# # ============================================================================ #
-# #  5. ENTRY POINT
-# # ============================================================================ #
-#
-#
-# def main() -> None:
-#     """Score one randomly-sampled body against the target set."""
-#     targets = load_targets()
-#
-#     console.log(f"encoding      : {GENOTYPE}")
-#     console.log(f"module budget : {NUM_OF_MODULES}")
-#     console.log(f"targets       : {len(targets)} bodies from {TARGET_DIR.name}")
-#     console.log(
-#         "target sizes  : "
-#         + ", ".join(str(t.number_of_nodes()) for t in targets),
-#     )
-#
-#     # How far apart are the targets from each other? Your fitness cannot go
-#     # below the best possible compromise, and this is the clue to where that is.
-#     spread = [
-#         tree_edit_distance(a, b)
-#         for i, a in enumerate(targets)
-#         for b in targets[i + 1 :]
-#     ]
-#     console.log(f"target spread : mean pairwise distance {np.mean(spread):.2f}")
-#
-#     # --- One random body --------------------------------------------------- #
-#     body = random_body(GENOTYPE, NUM_OF_MODULES)
-#     fitness = fitness_function(body, targets)
-#
-#     console.log("")
-#     console.log(f"random body   : {body.number_of_nodes()} modules")
-#     console.log(
-#         "per-target    : "
-#         + ", ".join(f"{d:.1f}" for d in distances_to_targets(body, targets)),
-#     )
-#     console.log(f"fitness       : {fitness:.4f}   (lower is better)")
-#
-#     show_body(body, MODE, file_name=f"random_{GENOTYPE}")
-
 """"""""""""""""""""""""""""
-6. Evolution--GR16--
+6. Initialization--GR16--
 """""""""""""""""""""""""""
 
 def initialize_population(targets:list, n:int=50) -> Population:
@@ -474,6 +314,10 @@ def initialize_population(targets:list, n:int=50) -> Population:
         population.append(ind)
     # We then create a population object and return it
     return Population(population)
+
+""""""""""""""""""""""""""""
+6. Evolution--GR16--
+"""""""""""""""""""""""""""
 
 def reproduction(parents: Population,p_mutation: float, mutation_func:str, points:int= 1) -> list[Individual]:
     """Perform standard GP subtree crossover on tree genomes.
@@ -527,18 +371,18 @@ def reproduction(parents: Population,p_mutation: float, mutation_func:str, point
             result.append(ind)
         return result
 
-    genome_length = len(genomes)
+    amount_of_parents = len(genomes)
     # We apply n-point crossover
     # This simply means that we doe a crossover between genomes
     # points times
     for _ in range(points):
         # We then perform Multi-parent recombination
         # It does not matter in our case how many parents the
-        for i in range(genome_length):
+        for i in range(amount_of_parents):
             # We find the nodes where we want to perform the cut:
             cut_1 = pick_noncore(genomes[i])
-            cut_2 = pick_noncore(child_genomes[(i + 1)%genome_length])
-            subtree_swap(genomes[i], child_genomes[(i + 1)%genome_length], cut_1, cut_2)
+            cut_2 = pick_noncore(child_genomes[(i + 1)%amount_of_parents])
+            subtree_swap(genomes[i], child_genomes[(i + 1)%amount_of_parents], cut_1, cut_2)
 
     try:
         for g in child_genomes:
@@ -577,6 +421,9 @@ def evolution_step(pop: Population,
     # subset
     for w in worst:
         w.alive = False
+        # We then send the dead robots to heaven
+        fallen_one = names.get_full_name()
+        w.genotype.save_json(str(DATA / "heaven" / fallen_one))
     # We then return all the alive individuals in
     # the population
     return pop.alive
@@ -593,12 +440,19 @@ def experiment(experiment:str,targets,
     os.makedirs(DATA / experiment / "best_genotype", exist_ok=True)
     os.makedirs(DATA / experiment / "statistics", exist_ok=True)
 
+    # We define the files where we want to place our target data
+    target_files = [
+        open(DATA / experiment / "statistics" / f"target_0{t}", "w")
+        for t in range(len(targets))
+    ]
+
     with open(DATA / experiment / "statistics"/"general_stats", "w") as f:
         for i in range(timesteps):
             # We perform an evolution step
             pop = evolution_step(pop)
-            # We determine the best of the populatio
+            # We determine the best and worst of the populatio
             best = pop.best(sort="min", n=1)[0]
+            worst = pop.best(sort="max", n=1)[0]
             # We save the genotype of the fittest individual as a
             # jSon file
             best.genotype.save_json(DATA / experiment / "best_genotype"/ f"time_{i}")
@@ -606,38 +460,108 @@ def experiment(experiment:str,targets,
             # statistics of the performance
             total_fitness =  np.array([pop.fitness for pop in pop])
             # We write down the statistics
-            f.write(f"{best.fitness:.2f}\t{float(np.mean(total_fitness)):.2f}\n")
+            f.write(f"{best.fitness:.2f}\t{float(np.mean(total_fitness)):.2f}\t{float(np.std(total_fitness)):.2f}\t{float(worst.fitness):.2f}\n")
+            # We also determine the distance from eah individual to
+            # each target
+            for t, tar in enumerate(targets):
+                distance_to_target = np.array(
+                    [tree_edit_distance(ind.genotype.to_networkx(), tar) for ind in pop]
+                )
+                target_files[t].write(
+                    f"{float(np.min(distance_to_target)):.2f}\t"
+                    f"{float(np.mean(distance_to_target)):.2f}\t"
+                    f"{float(np.std(distance_to_target)):.2f}\t"
+                    f"{float(np.max(distance_to_target)):.2f}\n"
+                )
 
 
-def plot_stats(experiment:str):
-    best_fitness = []
-    mean_std_fitness = []
-    timesteps = 0
-    with open(DATA / experiment / "statistics"/"general_stats", "r") as f:
-        for l in f.readlines():
-            info = l.split("\t")
-            best_fitness.append(float(info[0]))
-            mean_std_fitness.append(float(info[1]))
-            timesteps +=1
 
-    # We make a simple plot for all the data
-    plt.plot(range(timesteps), mean_std_fitness, label="Mean Fitness")
-    plt.plot(range(timesteps), best_fitness, linestyle="--", label="Best Fitness")
-    plt.legend()
-    plt.savefig(str(DATA / experiment / "statistics"/"general_stats_plot.svg"), dpi=200, bbox_inches="tight")
-    plt.close()
 
+"""""
+7. Plots and stats --GR16--
+"""""
+
+def plot_stats(experiment:str, target_plot:bool = False):
+    # We want to be able to plot multiple plots next to
+    # each other (for the target cases)
+    if target_plot:
+        amount_of_plots = 5
+    else:
+        amount_of_plots = 1
+    fig, axes = plt.subplots(1, amount_of_plots, figsize=(6 * amount_of_plots, 5), sharey=True)
+    if not target_plot:
+        axes = [axes]
+
+    # We define the statistics that are saved
+    for ax, i in zip(axes, range(amount_of_plots)):
+        best_fitness = []
+        mean_std_fitness = []
+        std_fitness = []
+        worst_fitness = []
+        timesteps = 0
+        # We set the file name
+        if not target_plot:
+            file = "general_stats"
+        else:
+            file = f"target_0{i}"
+
+        with open(DATA / experiment / "statistics"/file, "r") as f:
+            for l in f.readlines():
+                info = l.split("\t")
+                best_fitness.append(float(info[0]))
+                mean_std_fitness.append(float(info[1]))
+                std_fitness.append(float(info[2]))
+                worst_fitness.append(float(info[3]))
+                timesteps +=1
+
+        # We set the upper and lower bound of the std
+        upper = [mean_std_fitness[i] + std_fitness[i] for i in range(timesteps)]
+        lower = [mean_std_fitness[i] - std_fitness[i] for i in range(timesteps)]
+        # We also plot the mean, best and worst fitnesses
+        ax.plot(range(timesteps), mean_std_fitness, label="Mean Fitness")
+        ax.plot(range(timesteps), upper, color="gray", linestyle="--", label="STD Fitness")
+        ax.plot(range(timesteps), lower, color="gray", linestyle="--")
+        ax.plot(range(timesteps), best_fitness, label="Best Fitness")
+        ax.plot(range(timesteps), worst_fitness, label="Worst Fitness")
+
+        """"
+        We need to change the titles and to represent the targets when doing target plot
+        """
+        ax.set_title(experiment)
+        ax.legend()
+
+    if file != "general_stats":
+        file = "dinstance_to_targets"
+    fig.tight_layout()
+    """"
+    We want the file type to be svg in the final,
+    (these are vectorized drawings so you can zoom in indefenately)
+    for testing png works fine :)
+    """
+    os.makedirs(DATA / experiment / "plots", exist_ok=True)
+    fig.savefig(str(DATA / experiment / "plots"/f"{file}.svg"), dpi=200, bbox_inches="tight")
+    fig.savefig(str(DATA / experiment / "plots" / f"{file}.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+""""
+Target thingy and base line
+"""
 
 if __name__ == "__main__":
+
+
     """""""""
     "Before running a experiment, make sure to change the experiment run:"
     """""""""
     TIMESTEPS = 50
-    EXPERIMENTAL_RUNS = 5
+    EXPERIMENTAL_RUNS = 1
+    # We create a heaven for all the dead soldiers
+    os.makedirs(DATA / "heaven", exist_ok=True)
     # We load the targets
     targets = load_targets()
     # These are the values that we want to test
-    point_values = [1,2]
+    point_values = [1]
     amount_of_parents = [2]
     # These are the amout of runs that our experiment will take
     amount_of_runs = len(point_values) * len(amount_of_parents)
@@ -649,6 +573,7 @@ if __name__ == "__main__":
             print(f"Experiment {run_so_far}/{amount_of_runs}: point {point}, parent {amount}")
             # We run an experiment for each combination of parents and
             # points for the amount of experimental runs
+            SEED = 42
             for i in range(EXPERIMENTAL_RUNS):
                 print(".", end="")
                 experiment(f"point-{point}_parent-{amount}/exp{i}",
@@ -657,6 +582,7 @@ if __name__ == "__main__":
                            amount_parents=amount,
                            points=point)
                 plot_stats(f"point-{point}_parent-{amount}/exp{i}")
+                plot_stats(f"point-{point}_parent-{amount}/exp{i}", target_plot=True)
                 # We change the seed of our random valuebles
                 # every time we perform an experiment
                 SEED +=1
