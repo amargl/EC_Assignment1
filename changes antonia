@@ -1,3 +1,10 @@
+
+
+#added labels to plot stats
+        ax.set_title(experiment)
+        ax.set_xlabel("generations")
+        ax.set_ylabel("fitness")
+
 #made the existing code it easier to read and interpret 
 def show_body_tree(body: nx.DiGraph, file_name: str = "body"):
     # To better understand the inner workings of ARIEL and how the tree
