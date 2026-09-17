@@ -1,0 +1,106 @@
+#made the existing code it easier to read and interpret 
+def show_body_tree(body: nx.DiGraph, file_name: str = "body"):
+    # To better understand the inner workings of ARIEL and how the tree
+    # forms a robot, we added the following helper function which lets us plot
+    # the tree which represents the robot
+    pos = nx.nx_agraph.graphviz_layout(body, prog="dot")
+
+    plt.figure(figsize=(10, 7))
+
+    # For this we first need to get all the information of the different nodes
+    # and edges
+    node_labels = {
+        nid: f"{data.get('rotation', '').split("_")[1]}°" #add {data.get('type', '')}\n
+        for nid, data in body.nodes(data=True)
+    }
+    #edge_labels = nx.get_edge_attributes(body, "face")
+    edge_labels = {
+        edge: label[0]
+        for edge, label in nx.get_edge_attributes(body, "face").items()
+    }
+
+    # Separate nodes by type
+    core_nodes = [
+        nid for nid, data in body.nodes(data=True)
+        if data.get("type") == "CORE"
+    ]
+
+    brick_nodes = [
+        nid for nid, data in body.nodes(data=True)
+        if data.get("type") == "BRICK"
+    ]
+
+    joint_nodes = [
+        nid for nid, data in body.nodes(data=True)
+        if data.get("type") == "HINGE"
+    ]
+
+   # Draw the edges first
+    nx.draw_networkx_edges(
+        body,
+        pos,
+        arrows=True,
+        arrowsize=15,
+        edge_color="gray",
+    )
+
+    #draw core nodes as circles
+    nx.draw_networkx_nodes(
+        body,
+        pos,
+        nodelist=core_nodes,
+        node_shape="o",
+        node_size=1500,
+        node_color="yellow",
+    )
+
+    # Draw brick nodes as squares
+    nx.draw_networkx_nodes(
+        body,
+        pos,
+        nodelist=brick_nodes,
+        node_shape="s",
+        node_size=1000,
+        node_color="lightblue",
+    )
+
+    # Draw joint nodes as diamonds
+    nx.draw_networkx_nodes(
+        body,
+        pos,
+        nodelist=joint_nodes,
+        node_shape="D",
+        node_size=1000,
+        node_color="pink",
+    )
+
+    # Draw labels on top of the nodes
+    nx.draw_networkx_labels(
+        body,
+        pos,
+        labels=node_labels,
+        font_size=8,
+        font_weight="bold",
+    )
+
+    # Draw edge labels
+    nx.draw_networkx_edge_labels(
+        body,
+        pos,
+        edge_labels=edge_labels,
+        font_size=8,
+        rotate=False,
+        bbox=dict(
+            boxstyle="round,pad=0.2",
+            fc="white",
+            ec="none",
+            alpha=0.8,
+        ),
+    )
+
+
+    # We save a png of the image
+    plt.title(file_name)
+    plt.axis("off")
+    plt.savefig(str(DATA / f"{file_name}_tree.png"), dpi=200, bbox_inches="tight")
+    plt.close()
