@@ -431,7 +431,7 @@ def evolution_step(pop: Population,
     sub_pop.extend(children)
     # We then find the worst performing individuals
     # of the subsection
-    worst = sub_pop.best(sort="max", n=AMOUNT_PARENTS)
+    worst = sub_pop.best(sort="max", n=amount_parents)
     # We kill all the worst individuals in the
     # subset
     for w in worst:
